@@ -18,19 +18,10 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(gazebo_ros_pkgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(turtlebot3 REQUIRED)
 
 set(dependencies
-  "geometry_msgs"
-  "nav_msgs"
   "rclcpp"
-  "sensor_msgs"
-  "tf2"
 )
 
 install(DIRECTORY launch
