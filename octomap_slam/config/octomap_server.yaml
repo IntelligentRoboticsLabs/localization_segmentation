@@ -1,0 +1,4 @@
+octomap_server:
+  ros__parameters:
+    classes: ["person", "chair", "tv", "bottle"]
+    class_colors: ["00FF00", "FF0000", "0000FF", "FFFF00"]
