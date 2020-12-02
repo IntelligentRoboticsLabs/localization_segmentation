@@ -50,8 +50,8 @@ def generate_launch_description():
         node_executable='octomap_server',
         output='screen',
         parameters=[{
-            "mapping" : False,
-            "octomap_file" : pkg_dir + "/maps/octo_save.ot"
+            "mapping" : True,
+            # "octomap_file" : pkg_dir + "/maps/octo_save.ot"
           },
           config_file_path
           ],

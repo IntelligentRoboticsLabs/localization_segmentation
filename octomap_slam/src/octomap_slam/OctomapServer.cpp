@@ -27,7 +27,7 @@ using std::placeholders::_2;
 using namespace std::chrono_literals;
 
 OctomapServer::OctomapServer()
-: Node("octomap_server")
+: Node("octomap_server"), localization_quality_(1.0)
 {
   save_map_service_ = create_service<octomap_slam_msgs::srv::SaveMap>(
     "~/save_map", std::bind(&OctomapServer::save_map_callback, this, _1, _2));
@@ -44,13 +44,14 @@ OctomapServer::OctomapServer()
   
   this->get_parameter("voxel_resolution", voxel_res_);
   this->get_parameter("mapping", mapping_);
-  std::cerr << "==================================== 2" << std::endl;
+
   if (mapping_) {
     octomap_perceptions_sub_ = create_subscription<octomap_msgs::msg::Octomap>(
       "~/input_octomaps", 100,
       std::bind(&OctomapServer::octomap_perceptions_callback, this, _1));
-  }
-
+    localization_info_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/amcl_pose", 100,
+      std::bind(&OctomapServer::localization_info_callback, this, _1));  }
 
   tfBuffer_ = std::make_shared<tf2::BufferCore>();
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tfBuffer_, this, false);
@@ -58,20 +59,15 @@ OctomapServer::OctomapServer()
   std::string octomap_file;
   this->get_parameter("octomap_file", octomap_file);
 
-  std::cerr << "==================================== Loading [" << octomap_file <<"]" << std::endl;
-
-
-
   if (octomap_file != "") {
-
     octomap::AbstractOcTree* tree = octomap::AbstractOcTree::read(octomap_file);
     octomap_ = dynamic_cast<octomap::ColorOcTree*>(tree);
 
-    // if (octomap_->read(octomap_file)) {
-    //   RCLCPP_INFO(get_logger(), "Octomap loaded [%s]", octomap_file);
-    // } else {
-    //   RCLCPP_ERROR(get_logger(), "Error loading octomap [%s]", octomap_file);
-    // }
+    if (octomap_ != NULL) {
+      RCLCPP_INFO(get_logger(), "Octomap loaded [%s]", octomap_file);
+    } else {
+      RCLCPP_ERROR(get_logger(), "Error loading octomap [%s]", octomap_file);
+    }
   } else {
     double probHit, probMiss, thresMin, thresMax;
     probHit = 0.7;
@@ -98,6 +94,13 @@ OctomapServer::save_map_callback(
 }
 
 void
+OctomapServer::localization_info_callback(geometry_msgs::msg::PoseWithCovarianceStamped::UniquePtr msg)
+{
+  localization_quality_ = (1.0 - sqrt(msg->pose.covariance[0])) * (1.0 - sqrt(msg->pose.covariance[7])); // x^2 and y^2
+  std::cerr << "==> " << localization_quality_ << std::endl;
+}
+
+void
 OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePtr msg)
 {
   std::string error;
@@ -121,11 +124,29 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
           tf2::Vector3 p_map = tf2map * p_in;
 
           octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), false);
-          octomap_->setNodeValue(p_map.x(), p_map.y(), p_map.z(), 1.0, true);
+
+          double new_prob = localization_quality_;          
+          double previous_prob;
+
+          auto node = octomap_->search(p_map.x(), p_map.y(), p_map.z());
+          if (node != nullptr) {
+
+            if (static_cast<double>(node->getValue() < 0)) {
+              previous_prob = 0.1;
+            } else {
+              previous_prob = static_cast<double>(node->getValue());
+            }
+            
+            new_prob = (previous_prob + it->getValue() * localization_quality_) / 2.0;
+          }
+          std::cerr << previous_prob << "(" << node->getValue() << ") + " << localization_quality_ << " * " <<  it->getValue() << " / 2 = " << new_prob << std::endl;
+          octomap_->setNodeValue(p_map.x(), p_map.y(), p_map.z(), new_prob, true);
           octomap_->setNodeColor(p_map.x(), p_map.y(), p_map.z(), it->getColor().r, it->getColor().g, it->getColor().b);
         }
       }
       
+      std::cerr << std::endl;
+
       octomap_msgs::msg::Octomap octomap_msg;
       octomap_msg.header.frame_id = "map";
       octomap_msg.header.stamp = msg->header.stamp;

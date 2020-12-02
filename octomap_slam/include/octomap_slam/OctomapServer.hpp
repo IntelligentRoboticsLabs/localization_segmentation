@@ -26,6 +26,8 @@
 #include "octomap_slam_msgs/srv/save_map.hpp"
 #include "octomap_msgs/msg/octomap.hpp"
 
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
+
 #include "rclcpp/rclcpp.hpp"
 
 namespace octomap_server
@@ -42,10 +44,12 @@ protected:
     std::shared_ptr<octomap_slam_msgs::srv::SaveMap::Response> response);
 
   void octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePtr msg);
+  void localization_info_callback(geometry_msgs::msg::PoseWithCovarianceStamped::UniquePtr msg);
 
 private:
   rclcpp::Service<octomap_slam_msgs::srv::SaveMap>::SharedPtr save_map_service_;
   rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_perceptions_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr localization_info_sub_;
   rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octomap_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -58,6 +62,7 @@ private:
 
   double voxel_res_;
   bool mapping_;
+  double localization_quality_;
 };
 
 }  // namespace octomap_server
