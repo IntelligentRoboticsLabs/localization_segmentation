@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <random>
+
 #include "tf2_ros/buffer_interface.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "tf2/LinearMath/Quaternion.h"
 #include "tf2/convert.h"
 
 #include "octomap_slam/OctomapServer.hpp"
@@ -27,7 +31,7 @@ using std::placeholders::_2;
 using namespace std::chrono_literals;
 
 OctomapServer::OctomapServer()
-: Node("octomap_server"), localization_quality_(1.0)
+: Node("octomap_server")
 {
   save_map_service_ = create_service<octomap_slam_msgs::srv::SaveMap>(
     "~/save_map", std::bind(&OctomapServer::save_map_callback, this, _1, _2));
@@ -96,8 +100,7 @@ OctomapServer::save_map_callback(
 void
 OctomapServer::localization_info_callback(geometry_msgs::msg::PoseWithCovarianceStamped::UniquePtr msg)
 {
-  localization_quality_ = (1.0 - sqrt(msg->pose.covariance[0])) * (1.0 - sqrt(msg->pose.covariance[7])); // x^2 and y^2
-  std::cerr << "==> " << localization_quality_ << std::endl;
+  pose_with_cov_ = std::move(msg);
 }
 
 void
@@ -105,46 +108,88 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
 {
   std::string error;
   
+  if (pose_with_cov_ == nullptr) {
+    std::cerr << "Not pose with covariance received yet" << std::endl;
+  }
+
   if (tfBuffer_->canTransform("map", msg->header.frame_id,
       tf2::timeFromSec(rclcpp::Time(msg->header.stamp).seconds()), &error))
   {
     try {
-      geometry_msgs::msg::TransformStamped tf;
-      auto tf2map_msg = tfBuffer_->lookupTransform("map", msg->header.frame_id,
+
+      auto map2bf_msg = tfBuffer_->lookupTransform("map", "base_footprint",
+        tf2::timeFromSec(rclcpp::Time(msg->header.stamp).seconds()));
+      auto bf2tf_msg = tfBuffer_->lookupTransform("base_footprint", msg->header.frame_id,
         tf2::timeFromSec(rclcpp::Time(msg->header.stamp).seconds()));
 
-      tf2::Stamped<tf2::Transform> tf2map;
-      tf2::fromMsg(tf2map_msg, tf2map);
-    
+      tf2::Stamped<tf2::Transform> map2bf, bf2tf;
+      tf2::fromMsg(map2bf_msg, map2bf);
+      tf2::fromMsg(bf2tf_msg, bf2tf);
+
       octomap::ColorOcTree* received_octree = dynamic_cast<octomap::ColorOcTree*>(octomap_msgs::msgToMap(*msg));
 
-      for (auto it = received_octree->begin_leafs(); it != received_octree->end_leafs(); ++it) {
-        if (received_octree->isNodeOccupied(*it)) {
-          tf2::Vector3 p_in(it.getX(), it.getY(), it.getZ());
-          tf2::Vector3 p_map = tf2map * p_in;
+      int samples = 100;
+      std::default_random_engine generator;
+      std::normal_distribution<double> dist_x(0.0, sqrt(pose_with_cov_->pose.covariance[0]));
+      std::normal_distribution<double> dist_y(0.0, sqrt(pose_with_cov_->pose.covariance[7]));
+      std::normal_distribution<double> dist_z(0.0, sqrt(pose_with_cov_->pose.covariance[14]));
+      std::normal_distribution<double> dist_roll(0.0, sqrt(pose_with_cov_->pose.covariance[21]));
+      std::normal_distribution<double> dist_pitch(0.0, sqrt(pose_with_cov_->pose.covariance[28]));
+      std::normal_distribution<double> dist_yaw(0.0, sqrt(pose_with_cov_->pose.covariance[35]));
 
-          octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), false);
+      double roll, pitch, yaw;
+      map2bf.getRotation().setEuler(yaw, pitch, roll);
 
-          double new_prob = localization_quality_;          
-          double previous_prob;
+      std::cerr << "=======================================================" << std::endl;
+      std::cerr << "[" << map2bf.getOrigin().x() << ", " << map2bf.getOrigin().y() << ", " << map2bf.getOrigin().z() <<
+        ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "]" << std::endl;
 
-          auto node = octomap_->search(p_map.x(), p_map.y(), p_map.z());
-          if (node != nullptr) {
+      double K = 0.5;
 
-            if (static_cast<double>(node->getValue() < 0)) {
-              previous_prob = 0.1;
-            } else {
-              previous_prob = static_cast<double>(node->getValue());
+      for (int i=0; i < samples; i++) {
+        tf2::Transform noise;
+        noise.setOrigin(tf2::Vector3(dist_x(generator), dist_y(generator), dist_z(generator)));
+        
+        tf2::Quaternion q;
+        q.setRPY(dist_roll(generator), dist_pitch(generator), dist_yaw(generator));
+        noise.setRotation(q);
+
+        noise.getRotation().setRPY(roll, pitch, yaw);
+
+        tf2::Transform result = map2bf * noise * bf2tf;
+        std::cerr << "noise = [" << noise.getOrigin().x() << ", " << noise.getOrigin().y() << ", " << noise.getOrigin().z() << ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "] -> ";
+
+
+        result.getRotation().setRPY(roll, pitch, yaw);
+        std::cerr << "[" << result.getOrigin().x() << ", " << result.getOrigin().y() << ", " << result.getOrigin().z() << ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "]" << std::endl;
+
+        for (auto it = received_octree->begin_leafs(); it != received_octree->end_leafs(); ++it) {
+          if (received_octree->isNodeOccupied(*it)) {
+            tf2::Vector3 p_in(it.getX(), it.getY(), it.getZ());
+            tf2::Vector3 p_map =  map2bf * noise * bf2tf * p_in;
+  
+            octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), false);
+  
+            double new_prob = 1.0;          
+            double previous_prob;
+  
+            auto node = octomap_->search(p_map.x(), p_map.y(), p_map.z());
+            if (node != nullptr) {
+  
+              if (static_cast<double>(node->getValue() < 0)) {
+                previous_prob = 0.1;
+              } else {
+                previous_prob = static_cast<double>(node->getValue());
+              }
+              
+              new_prob = K * previous_prob + (1.0 - K) * 1.0 / static_cast<double>(samples);
             }
-            
-            new_prob = (previous_prob + it->getValue() * localization_quality_) / 2.0;
+            //std::cerr << previous_prob << "(" << node->getValue() << ") + " << 1.0 << " * " <<  it->getValue() << " / 2 = " << new_prob << std::endl;
+            octomap_->setNodeValue(p_map.x(), p_map.y(), p_map.z(), new_prob, true);
+            octomap_->setNodeColor(p_map.x(), p_map.y(), p_map.z(), it->getColor().r, it->getColor().g, it->getColor().b);
           }
-          std::cerr << previous_prob << "(" << node->getValue() << ") + " << localization_quality_ << " * " <<  it->getValue() << " / 2 = " << new_prob << std::endl;
-          octomap_->setNodeValue(p_map.x(), p_map.y(), p_map.z(), new_prob, true);
-          octomap_->setNodeColor(p_map.x(), p_map.y(), p_map.z(), it->getColor().r, it->getColor().g, it->getColor().b);
         }
       }
-      
       std::cerr << std::endl;
 
       octomap_msgs::msg::Octomap octomap_msg;

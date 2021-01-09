@@ -62,7 +62,10 @@ private:
 
   double voxel_res_;
   bool mapping_;
-  double localization_quality_;
+  
+  geometry_msgs::msg::PoseWithCovarianceStamped::UniquePtr pose_with_cov_;
+
+
 };
 
 }  // namespace octomap_server

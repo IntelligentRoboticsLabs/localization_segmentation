@@ -24,6 +24,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(octomap_slam_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
 set(dependencies
   rclcpp
@@ -33,6 +34,7 @@ set(dependencies
   tf2
   tf2_ros
   geometry_msgs
+  tf2_geometry_msgs
 )
 
 include_directories(include/)
