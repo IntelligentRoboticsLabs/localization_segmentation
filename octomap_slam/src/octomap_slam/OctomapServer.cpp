@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <random>
+#include <algorithm>
 
 #include "tf2_ros/buffer_interface.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
@@ -22,6 +23,7 @@
 
 #include "octomap_slam/OctomapServer.hpp"
 #include "octomap_msgs/conversions.h"
+#include "octomap/octomap_utils.h"
 
 namespace octomap_server
 {
@@ -107,7 +109,8 @@ void
 OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePtr msg)
 {
   std::string error;
-  
+  // octomap_->clear();
+
   if (pose_with_cov_ == nullptr) {
     std::cerr << "Not pose with covariance received yet" << std::endl;
   }
@@ -128,25 +131,21 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
 
       octomap::ColorOcTree* received_octree = dynamic_cast<octomap::ColorOcTree*>(octomap_msgs::msgToMap(*msg));
 
-      int samples = 100;
+      int samples = 1;
       std::default_random_engine generator;
-      std::normal_distribution<double> dist_x(0.0, sqrt(pose_with_cov_->pose.covariance[0]));
-      std::normal_distribution<double> dist_y(0.0, sqrt(pose_with_cov_->pose.covariance[7]));
-      std::normal_distribution<double> dist_z(0.0, sqrt(pose_with_cov_->pose.covariance[14]));
-      std::normal_distribution<double> dist_roll(0.0, sqrt(pose_with_cov_->pose.covariance[21]));
-      std::normal_distribution<double> dist_pitch(0.0, sqrt(pose_with_cov_->pose.covariance[28]));
-      std::normal_distribution<double> dist_yaw(0.0, sqrt(pose_with_cov_->pose.covariance[35]));
+      std::normal_distribution<double> dist_x(0.0, (pose_with_cov_->pose.covariance[0]));
+      std::normal_distribution<double> dist_y(0.0, (pose_with_cov_->pose.covariance[7]));
+      std::normal_distribution<double> dist_z(0.0, (pose_with_cov_->pose.covariance[14]));
+      std::normal_distribution<double> dist_roll(0.0, (pose_with_cov_->pose.covariance[21]));
+      std::normal_distribution<double> dist_pitch(0.0, (pose_with_cov_->pose.covariance[28]));
+      std::normal_distribution<double> dist_yaw(0.0, (pose_with_cov_->pose.covariance[35]));
 
       double roll, pitch, yaw;
-      map2bf.getRotation().setEuler(yaw, pitch, roll);
+      map2bf.getRotation().normalized().setEuler(yaw, pitch, roll);
 
-      std::cerr << "=======================================================" << std::endl;
-      std::cerr << "[" << map2bf.getOrigin().x() << ", " << map2bf.getOrigin().y() << ", " << map2bf.getOrigin().z() <<
-        ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "]" << std::endl;
+      double K = 0.9;
 
-      double K = 0.5;
-
-      for (int i=0; i < samples; i++) {
+      for (int i = 0; i < samples; i++) {
         tf2::Transform noise;
         noise.setOrigin(tf2::Vector3(dist_x(generator), dist_y(generator), dist_z(generator)));
         
@@ -154,43 +153,31 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
         q.setRPY(dist_roll(generator), dist_pitch(generator), dist_yaw(generator));
         noise.setRotation(q);
 
-        noise.getRotation().setRPY(roll, pitch, yaw);
-
-        tf2::Transform result = map2bf * noise * bf2tf;
-        std::cerr << "noise = [" << noise.getOrigin().x() << ", " << noise.getOrigin().y() << ", " << noise.getOrigin().z() << ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "] -> ";
-
-
-        result.getRotation().setRPY(roll, pitch, yaw);
-        std::cerr << "[" << result.getOrigin().x() << ", " << result.getOrigin().y() << ", " << result.getOrigin().z() << ", " <<  roll << ", " << pitch << ", " << yaw << ", " << "]" << std::endl;
-
         for (auto it = received_octree->begin_leafs(); it != received_octree->end_leafs(); ++it) {
           if (received_octree->isNodeOccupied(*it)) {
             tf2::Vector3 p_in(it.getX(), it.getY(), it.getZ());
             tf2::Vector3 p_map =  map2bf * noise * bf2tf * p_in;
+        
+            double new_prob;          
   
-            octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), false);
-  
-            double new_prob = 1.0;          
-            double previous_prob;
-  
-            auto node = octomap_->search(p_map.x(), p_map.y(), p_map.z());
+            octomap::OcTreeKey key = octomap_->coordToKey(octomap::point3d(p_map.x(), p_map.y(), p_map.z()));
+            auto node = octomap_->search(key);
+
             if (node != nullptr) {
-  
-              if (static_cast<double>(node->getValue() < 0)) {
-                previous_prob = 0.1;
-              } else {
-                previous_prob = static_cast<double>(node->getValue());
-              }
-              
-              new_prob = K * previous_prob + (1.0 - K) * 1.0 / static_cast<double>(samples);
+              double previous_prob = std::clamp(static_cast<double>(node->getOccupancy()), 0.0, 1.0);
+              new_prob = std::clamp(K * previous_prob + (1.0 - K) * it->getOccupancy() / static_cast<double>(samples), 0.0, 1.0);
+              // std::cerr << new_prob << "=" << K << " * " << previous_prob << "+ (1.0 - " << K << ") * " << it->getOccupancy() << " / " << static_cast<double>(samples) << std::endl;;
+            } else {
+              node = octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), true);
+              new_prob = 0.1; // it->getOccupancy() / static_cast<double>(samples);
             }
-            //std::cerr << previous_prob << "(" << node->getValue() << ") + " << 1.0 << " * " <<  it->getValue() << " / 2 = " << new_prob << std::endl;
-            octomap_->setNodeValue(p_map.x(), p_map.y(), p_map.z(), new_prob, true);
-            octomap_->setNodeColor(p_map.x(), p_map.y(), p_map.z(), it->getColor().r, it->getColor().g, it->getColor().b);
+           
+            
+            node->setLogOdds(octomap::logodds(new_prob));
+            node->setColor(it->getColor().r, it->getColor().g, it->getColor().b);
           }
         }
       }
-      std::cerr << std::endl;
 
       octomap_msgs::msg::Octomap octomap_msg;
       octomap_msg.header.frame_id = "map";
