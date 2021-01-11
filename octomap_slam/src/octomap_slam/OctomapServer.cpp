@@ -155,6 +155,9 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
 
         for (auto it = received_octree->begin_leafs(); it != received_octree->end_leafs(); ++it) {
           if (received_octree->isNodeOccupied(*it)) {
+
+            bool negative_cell = (it->getColor().r == 0 && it->getColor().g == 0 && it->getColor().b == 0);
+
             tf2::Vector3 p_in(it.getX(), it.getY(), it.getZ());
             tf2::Vector3 p_map =  map2bf * noise * bf2tf * p_in;
         
@@ -165,16 +168,27 @@ OctomapServer::octomap_perceptions_callback(octomap_msgs::msg::Octomap::UniquePt
 
             if (node != nullptr) {
               double previous_prob = std::clamp(static_cast<double>(node->getOccupancy()), 0.0, 1.0);
+              
               new_prob = std::clamp(K * previous_prob + (1.0 - K) * it->getOccupancy() / static_cast<double>(samples), 0.0, 1.0);
-              // std::cerr << new_prob << "=" << K << " * " << previous_prob << "+ (1.0 - " << K << ") * " << it->getOccupancy() << " / " << static_cast<double>(samples) << std::endl;;
-            } else {
+              
+              if (negative_cell) {
+                new_prob = std::clamp(previous_prob -0.01, 0.0, 1.0);
+              } else {
+                new_prob = std::clamp(K * previous_prob + (1.0 - K) * it->getOccupancy() / static_cast<double>(samples), 0.0, 1.0);
+              }
+
+            } else if (!negative_cell) {
               node = octomap_->updateNode(p_map.x(), p_map.y(), p_map.z(), true);
               new_prob = 0.1; // it->getOccupancy() / static_cast<double>(samples);
             }
            
-            
-            node->setLogOdds(octomap::logodds(new_prob));
-            node->setColor(it->getColor().r, it->getColor().g, it->getColor().b);
+            if (node != nullptr) {
+              node->setLogOdds(octomap::logodds(new_prob));
+
+              if (!negative_cell) {
+                node->setColor(it->getColor().r, it->getColor().g, it->getColor().b);
+              }
+            }
           }
         }
       }
